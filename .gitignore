@@ -16,6 +16,7 @@ dist/
 /build/*
 /.vscode
 /.claude
+/.codex
 
 # misc
 .DS_Store

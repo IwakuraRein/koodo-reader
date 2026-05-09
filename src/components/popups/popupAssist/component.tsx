@@ -128,7 +128,7 @@ class PopupAssist extends React.Component<PopupAssistProps, PopupAssistState> {
             .replace(/-/gm, "")
             // Remove common garbage characters
             .replace(
-              /[^\x20-\x7E\u00A0-\u00FF\u0100-\u017F\u4E00-\u9FFF\u3000-\u303F]/g,
+              /[^\x20-\x7E\u00A0-\u00FF\u0100-\u017F\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\u4E00-\u9FFF\u3000-\u303F]/g,
               ""
             )
             // Remove consecutive spaces
