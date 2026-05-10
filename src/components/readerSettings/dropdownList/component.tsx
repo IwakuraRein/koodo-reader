@@ -31,7 +31,7 @@ class DropdownList extends React.Component<
         ? ConfigService.getReaderConfig("fullTranslationMode") || ""
         : "",
       currentTextOrientationValue:
-        ConfigService.getReaderConfig("textOrientation") || "",
+        ConfigService.getReaderConfig("textOrientation") || "horizontal",
       currentSelectActionValue:
         ConfigService.getReaderConfig("selectAction") || "",
       currentTxtParserValue:

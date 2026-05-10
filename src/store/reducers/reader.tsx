@@ -51,7 +51,7 @@ const initState = {
   isHidePDFConvertButton:
     ConfigService.getReaderConfig("isHidePDFConvertButton") === "yes",
   isShowPageBorder: ConfigService.getReaderConfig("isShowPageBorder") === "yes",
-  textOrientation: ConfigService.getReaderConfig("textOrientation") || "",
+  textOrientation: ConfigService.getReaderConfig("textOrientation") || "horizontal",
   readerBackgroundImage:
     ConfigService.getReaderConfig("readerBackgroundImage") || "",
 };

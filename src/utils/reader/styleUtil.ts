@@ -57,7 +57,20 @@ class styleUtil {
   }
   // get default css for iframe
   static getDefaultCss(bookKey: string) {
-    return StyleHelper.getDefaultCss(ConfigService, bookKey);
+    const css = this.fixDefaultCss(
+      StyleHelper.getDefaultCss(ConfigService, bookKey)
+    );
+    return css;
+  }
+
+  static fixDefaultCss(css: string) {
+    // the default css display head and title
+    return (
+      css
+        .replace(/,\s*title(?=\s*\{)/g, "")
+        .replace(/;?\s*display:\s*contents\s*!important;?/g, ";") +
+      "head,title{display:none!important;}"
+    );
   }
 
   static applyTheme() {

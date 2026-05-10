@@ -53,7 +53,7 @@ export const dropdownList = [
     title: "Text orientation",
     value: "textOrientation",
     option: [
-      { label: "Default", value: "" },
+      // { label: "Default", value: "" },
       { label: "Horizontal", value: "horizontal" },
       { label: "Vertical", value: "vertical" },
     ],
