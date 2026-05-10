@@ -528,14 +528,9 @@ export function handleFetchPlugins() {
 }
 export function handleFetchAuthed() {
   return (dispatch: Dispatch) => {
+
     try {
-      TokenService.getToken("is_authed").then((value) => {
-        let isAuthed = value === "yes";
-        if (isAuthed && !ConfigService.getItem("serverRegion")) {
-          ConfigService.setItem("serverRegion", "global");
-        }
-        dispatch(handleAuthed(isAuthed));
-      });
+      dispatch(handleAuthed(true));
     } catch (error) {
       console.error(error);
     }
