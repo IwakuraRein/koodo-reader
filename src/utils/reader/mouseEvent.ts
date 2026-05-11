@@ -9,6 +9,17 @@ declare var window: any;
 let throttleTime =
   ConfigService.getReaderConfig("isSliding") === "yes" ? 1000 : 100;
 
+export const getSelectionText = (doc: Document, sel: Selection) => {
+  // remove <rp> and <rt>
+  if (!sel.rangeCount) return "";
+  const div = doc.createElement("div");
+  div.append(...Array.from({ length: sel.rangeCount }, (_, i) =>
+    sel.getRangeAt(i).cloneContents()
+  ));
+  div.querySelectorAll("rp, rt").forEach((el) => el.remove());
+  return div.textContent?.trim() || "";
+}
+
 export const getSelection = (format: string, bookKey?: string) => {
   let docs = getIframeDoc(format, bookKey);
   let text = "";
@@ -17,8 +28,7 @@ export const getSelection = (format: string, bookKey?: string) => {
     if (!doc) continue;
     let sel = doc.getSelection();
     if (!sel) continue;
-    text = sel.toString();
-    text = text && text.trim();
+    text = getSelectionText(doc, sel);
     if (text) {
       break;
     }
@@ -45,8 +55,13 @@ export const getSelectionSentence = (
         container.nodeType === Node.TEXT_NODE
           ? container.parentElement
           : container;
-      let fullText = (el as Element)?.textContent || "";
-      let selectedText = sel.toString().trim();
+      let fullText = "";
+      if (el instanceof Element) {
+        const clone = el.cloneNode(true) as Element;
+        clone.querySelectorAll("rp, rt").forEach((node) => node.remove());
+        fullText = clone.textContent || "";
+      }
+      let selectedText = getSelectionText(doc, sel);
       // Split on sentence-ending punctuation to find the sentence
       let sentences = fullText.split(/(?<=[.!?。！？])\s*/);
       for (let s of sentences) {
