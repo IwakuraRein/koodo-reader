@@ -20,6 +20,7 @@ import BookUtil from "../../utils/file/bookUtil";
 import i18n from "../../i18n";
 import { azureTTSVoiceList, officialVoiceList } from "../../constants/ttsList";
 import { langToName } from "../../utils/common";
+import { syncServerLibraryBooks } from "../../utils/file/serverLibrary";
 import { resetReaderRequest } from "../../utils/request/reader";
 import { resetThirdpartyRequest } from "../../utils/request/thirdparty";
 export function handleBooks(books: BookModel[]) {
@@ -109,6 +110,7 @@ export function handleNoteSortCode(noteSortCode: {
 
 export function handleFetchBooks() {
   return async (dispatch: Dispatch) => {
+    await syncServerLibraryBooks();
     let bookSortCodeStr =
       ConfigService.getReaderConfig("bookSortCode") || '{"sort":1,"order":2}';
     let bookSortCode = JSON.parse(bookSortCodeStr);

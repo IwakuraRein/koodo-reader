@@ -16,6 +16,7 @@ import i18n from "../../i18n";
 import { getCloudConfig } from "./common";
 import CoverUtil from "./coverUtil";
 import { LocalFileManager } from "./localFile";
+import { isServerBookKey, isServerBookPath } from "./serverLibrary";
 declare var window: any;
 
 class BookUtil {
@@ -55,6 +56,9 @@ class BookUtil {
     }
   }
   static deleteBook(key: string, format: string) {
+    if (isServerBookKey(key)) {
+      return Promise.resolve();
+    }
     try {
       if (isElectron) {
         const fs_extra = window.require("fs-extra");
@@ -88,6 +92,10 @@ class BookUtil {
   }
   static isBookExist(key: string, format: string, bookPath: string) {
     return new Promise<boolean>((resolve) => {
+      if (isServerBookPath(bookPath)) {
+        resolve(!key.startsWith("cache-"));
+        return;
+      }
       if (isElectron) {
         var fs = window.require("fs");
         var path = window.require("path");
@@ -132,6 +140,33 @@ class BookUtil {
     isArrayBuffer: boolean = false,
     bookPath: string
   ) {
+    if (!isElectron && isServerBookPath(bookPath)) {
+      return fetch(bookPath, { credentials: "same-origin" })
+        .then(async (response) => {
+          if (!response.ok) {
+            return false;
+          }
+          const buffer = await response.arrayBuffer();
+          if (isArrayBuffer) {
+            return buffer;
+          }
+          const filename =
+            new URL(bookPath, window.location.origin).searchParams.get(
+              "name"
+            ) || `${key}.${format}`;
+          const blob = new Blob([buffer], {
+            type: CommonTool.getMimeType(format.toLowerCase()),
+          });
+          return new File([blob], filename, {
+            lastModified: new Date().getTime(),
+            type: blob.type,
+          });
+        })
+        .catch((error) => {
+          console.error("fetch server book error:", error);
+          return false;
+        });
+    }
     if (isElectron) {
       return new Promise<File | ArrayBuffer | boolean>((resolve) => {
         var fs = window.require("fs");
@@ -491,6 +526,9 @@ class BookUtil {
     let books: Book[] = (await DatabaseService.getAllRecords("books")) || [];
     let fileList: string[] = [];
     for (let book of books) {
+      if (isServerBookKey(book.key)) {
+        continue;
+      }
       if (await this.isBookExist(book.key, book.format.toLowerCase(), "")) {
         fileList.push(book.key + "." + book.format.toLowerCase());
       }

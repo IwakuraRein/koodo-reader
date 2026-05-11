@@ -2,8 +2,78 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const url = require("url");
+const crypto = require("crypto");
 
-// 从 Docker Secrets 读取密码的函数
+const SUPPORTED_FORMATS = new Set([
+  ".epub",
+  ".pdf",
+  ".txt",
+  ".mobi",
+  ".azw3",
+  ".azw",
+  ".htm",
+  ".html",
+  ".xml",
+  ".xhtml",
+  ".mhtml",
+  ".docx",
+  ".md",
+  ".fb2",
+  ".cbz",
+  ".cbt",
+  ".cbr",
+  ".cb7",
+]);
+
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".wasm": "application/wasm",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".epub": "application/epub+zip",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8",
+  ".mobi": "application/x-mobipocket-ebook",
+  ".azw": "application/vnd.amazon.ebook",
+  ".azw3": "application/vnd.amazon.ebook",
+  ".docx":
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".cbz": "application/x-cbz",
+  ".cbr": "application/x-cbr",
+  ".cbt": "application/x-cbt",
+  ".cb7": "application/x-cb7",
+};
+
+function parseCliArgs(argv) {
+  const args = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const item = argv[i];
+    if (!item.startsWith("--")) continue;
+    const key = item.slice(2);
+    const next = argv[i + 1];
+    if (!next || next.startsWith("--")) {
+      args[key] = "true";
+    } else {
+      args[key] = next;
+      i += 1;
+    }
+  }
+  return args;
+}
+
+const cliArgs = parseCliArgs(process.argv.slice(2));
+const requestedLibraryPath = cliArgs.library || process.env.KOODO_LIBRARY_PATH || "";
+
 function getDockerSecret(secretName) {
   try {
     const secretPath = `/run/secrets/${secretName}`;
@@ -16,11 +86,19 @@ function getDockerSecret(secretName) {
   return null;
 }
 
-// 配置信息
-const UPLOAD_DIR = path.resolve("./uploads"); // 使用绝对路径
-const PORT = process.env.PORT || 8080;
-const SERVER_ENABLED = process.env.ENABLE_HTTP_SERVER === "true"; // 新增：控制服务器是否启用
-// 优先从 Docker Secrets 读取密码，如果没有则回退到环境变量
+const PORT = Number(cliArgs.port || process.env.PORT || 8080);
+const HOST =
+  cliArgs.host || process.env.HOST || (requestedLibraryPath ? "0.0.0.0" : "127.0.0.1");
+const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || "./uploads");
+const BUILD_DIR = path.resolve(cliArgs.build || process.env.BUILD_DIR || "./build");
+const SERVER_ENABLED =
+  process.env.ENABLE_HTTP_SERVER === "true" || cliArgs.files === "true";
+const LIBRARY_PATH = requestedLibraryPath;
+const SERVER_MODE =
+  cliArgs.server === "true" ||
+  process.env.KOODO_SERVER_MODE === "true" ||
+  !!LIBRARY_PATH;
+const REQUIRE_AUTH = process.env.SERVER_AUTH === "true";
 const SERVER_PASSWORD_FILE = process.env.SERVER_PASSWORD_FILE || "my_secret";
 const SERVER_PASSWORD =
   getDockerSecret(SERVER_PASSWORD_FILE) ||
@@ -31,57 +109,55 @@ const VALID_CREDENTIALS = {
   password: SERVER_PASSWORD,
 };
 
-// CORS 允许的来源列表（逗号分隔）。默认不允许任何跨域来源，
-// 仅允许同源（无 Origin 头）请求，以避免 CSRF/凭据滥用。
-// 例如：ALLOWED_ORIGINS="https://reader.example.com,https://app.example.com"
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
-  .map((o) => o.trim())
-  .filter((o) => o.length > 0);
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-// 验证密码来源
-if (getDockerSecret(SERVER_PASSWORD_FILE)) {
-  console.info("Using password from Docker Secret");
-} else if (process.env.SERVER_PASSWORD) {
-  console.warn("Using password from environment variable (less secure)");
-} else {
-  console.warn(
-    "Warning: Using default password. Set Docker Secret or SERVER_PASSWORD environment variable for production."
-  );
-}
+let cachedLibraryFiles = [];
+let cachedAt = 0;
 
-if (!process.env.SERVER_USERNAME) {
-  console.warn(
-    "Warning: Using default username. Set SERVER_USERNAME environment variable for production."
-  );
-}
-
-if (ALLOWED_ORIGINS.length === 0) {
-  console.warn(
-    "Warning: No ALLOWED_ORIGINS configured. Cross-origin requests will be denied. " +
-      "Set ALLOWED_ORIGINS to a comma-separated list of trusted origins if needed."
-  );
-}
-
-// 检查服务器是否启用
-if (!SERVER_ENABLED) {
+if (!SERVER_ENABLED && !SERVER_MODE) {
   console.info(
-    "HTTP Server is disabled. Set ENABLE_HTTP_SERVER=true to enable it."
+    "HTTP server is disabled. Set ENABLE_HTTP_SERVER=true, KOODO_LIBRARY_PATH, or pass --library <path>."
   );
   process.exit(0);
 }
 
-// 创建上传目录（如果不存在）
-if (!fs.existsSync(UPLOAD_DIR)) {
+if (SERVER_ENABLED && !fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// 设置安全的 CORS 头部：
-// - 仅当请求 Origin 在白名单中时回显该 Origin，并允许凭据
-// - 否则不发送 ACAO 头，浏览器会阻止跨域响应读取
-// 永远不会同时使用通配符 "*" 与 Allow-Credentials: true。
+if (SERVER_MODE && !LIBRARY_PATH) {
+  console.error("Server mode needs a library path. Pass --library <path>.");
+  process.exit(1);
+}
+
+const LIBRARY_ROOT = LIBRARY_PATH ? path.resolve(LIBRARY_PATH) : "";
+if (SERVER_MODE) {
+  if (!fs.existsSync(LIBRARY_ROOT) || !fs.statSync(LIBRARY_ROOT).isDirectory()) {
+    console.error(`Library path does not exist or is not a directory: ${LIBRARY_ROOT}`);
+    process.exit(1);
+  }
+  if (!fs.existsSync(BUILD_DIR)) {
+    console.warn(
+      `Build directory not found: ${BUILD_DIR}. Run "yarn build" before using browser server mode.`
+    );
+  }
+}
+
+function getServerOrigin(req) {
+  const host = req.headers.host;
+  if (!host) return null;
+  const scheme =
+    req.socket && req.socket.encrypted
+      ? "https"
+      : (req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
+  return `${scheme}://${host}`;
+}
+
 function applyCorsHeaders(req, res) {
-  const origin = req.headers["origin"];
+  const origin = req.headers.origin;
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -94,76 +170,12 @@ function applyCorsHeaders(req, res) {
   return false;
 }
 
-// 计算请求的有效服务端 Origin，用于判断 Origin 头是否表示同源请求。
-// 浏览器在同源的 POST/DELETE/fetch 请求中也会发送 Origin 头，
-// 因此不能仅凭 Origin 头存在就将其视为跨域请求。
-function getServerOrigin(req) {
-  const host = req.headers["host"];
-  if (!host) return null;
-  const scheme =
-    req.socket && req.socket.encrypted
-      ? "https"
-      : (req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
-  return `${scheme}://${host}`;
-}
-
-const server = http.createServer((req, res) => {
-  const origin = req.headers["origin"];
-  const serverOrigin = getServerOrigin(req);
-  const isCrossOrigin = !!origin && origin !== serverOrigin;
-  const corsAllowed = applyCorsHeaders(req, res);
-
-  // 处理预检请求
-  if (req.method === "OPTIONS") {
-    if (isCrossOrigin && !corsAllowed) {
-      res.writeHead(403, { "Content-Type": "text/plain" });
-      return res.end("Origin not allowed");
-    }
-    res.writeHead(204);
-    return res.end();
-  }
-
-  // 对于跨域的实际请求，若来源不在白名单则拒绝，
-  // 防止凭据被跨站请求滥用 (CSRF / CWE-942)。
-  // 同源请求（包括带 Origin 头的 POST/DELETE）允许通过。
-  if (isCrossOrigin && !corsAllowed) {
-    res.writeHead(403, { "Content-Type": "text/plain" });
-    return res.end("Origin not allowed");
-  }
-
-  // 认证检查
-  if (!authenticate(req)) {
-    res.writeHead(401, {
-      "WWW-Authenticate": 'Basic realm="Secure File Server"',
-      "Content-Type": "text/plain",
-    });
-    return res.end("Unauthorized");
-  }
-
-  // 路由处理
-  const parsedUrl = url.parse(req.url, true);
-
-  if (req.method === "POST" && parsedUrl.pathname === "/upload") {
-    handleUpload(req, res, parsedUrl.query.dir || "");
-  } else if (req.method === "GET" && parsedUrl.pathname === "/download") {
-    handleDownload(req, res, parsedUrl.query.dir || "");
-  } else if (req.method === "DELETE" && parsedUrl.pathname === "/delete") {
-    handleDelete(req, res, parsedUrl.query.dir || "");
-  } else if (req.method === "GET" && parsedUrl.pathname === "/list") {
-    handleList(req, res, parsedUrl.query.dir || "");
-  } else {
-    res.writeHead(404, { "Content-Type": "text/plain" });
-    res.end("Not Found");
-  }
-});
-
-// 基本认证验证
 function authenticate(req) {
-  const authHeader = req.headers["authorization"];
+  const authHeader = req.headers.authorization;
   if (!authHeader) return false;
 
   const [scheme, credentials] = authHeader.split(" ");
-  if (scheme !== "Basic") return false;
+  if (scheme !== "Basic" || !credentials) return false;
 
   const [username, password] = Buffer.from(credentials, "base64")
     .toString()
@@ -175,70 +187,253 @@ function authenticate(req) {
   );
 }
 
-// 安全处理文件名
-function sanitizeFilename(originalName) {
-  // 移除路径部分，只保留文件名
-  const base = path.basename(originalName);
-
-  // 替换非法字符（Windows文件系统非法字符）
-  return base.replace(/[\\/:*?"<>|]/g, "_");
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
 }
 
-// 安全路径解析（防止目录遍历攻击）
-function resolveSafePath(...pathSegments) {
+function sendText(res, statusCode, message) {
+  res.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(message);
+}
+
+function sanitizeFilename(originalName) {
+  return path.basename(originalName).replace(/[\\/:*?"<>|]/g, "_");
+}
+
+function resolveUploadPath(...pathSegments) {
   const targetPath = path.resolve(UPLOAD_DIR, ...pathSegments);
   const relativePath = path.relative(UPLOAD_DIR, targetPath);
-
-  // 检查路径是否试图访问UPLOAD_DIR之外
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     throw new Error("Invalid path");
   }
-
   return targetPath;
 }
 
-// 文件上传处理
+function resolveBuildPath(requestPath) {
+  const decodedPath = decodeURIComponent(requestPath);
+  const relative = decodedPath === "/" ? "index.html" : decodedPath.slice(1);
+  const targetPath = path.resolve(BUILD_DIR, relative);
+  const relativePath = path.relative(BUILD_DIR, targetPath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    throw new Error("Invalid path");
+  }
+  return targetPath;
+}
+
+function normalizeRelativePath(filePath) {
+  return path.relative(LIBRARY_ROOT, filePath).split(path.sep).join("/");
+}
+
+function getLibraryId(relativePath) {
+  return crypto.createHash("sha1").update(relativePath).digest("hex").slice(0, 16);
+}
+
+function getBookName(filename) {
+  const extension = path.extname(filename);
+  return filename.slice(0, filename.length - extension.length) || filename;
+}
+
+function getBookRecord(filePath) {
+  const stat = fs.statSync(filePath);
+  const relativePath = normalizeRelativePath(filePath);
+  const filename = path.basename(filePath);
+  const extension = path.extname(filename).toLowerCase();
+  const id = getLibraryId(relativePath);
+  const format = extension.replace(".", "").toUpperCase();
+
+  return {
+    key: `server-${id}`,
+    name: getBookName(filename),
+    author: "",
+    description: `Server library: ${path.dirname(relativePath)}`,
+    md5: id,
+    cover: "",
+    format,
+    publisher: "",
+    size: stat.size,
+    page: 0,
+    path: `/api/server-library/book/${id}?name=${encodeURIComponent(filename)}`,
+    charset: "",
+    relativePath,
+    modifiedTime: stat.mtime.toISOString(),
+  };
+}
+
+function scanLibraryFiles() {
+  if (!SERVER_MODE) return [];
+  const now = Date.now();
+  if (now - cachedAt < 3000) {
+    return cachedLibraryFiles;
+  }
+
+  const result = [];
+  const stack = [LIBRARY_ROOT];
+  while (stack.length > 0) {
+    const currentDir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch (err) {
+      console.warn(`Skipping unreadable directory ${currentDir}:`, err.message);
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      const extension = path.extname(entry.name).toLowerCase();
+      if (SUPPORTED_FORMATS.has(extension)) {
+        result.push(getBookRecord(fullPath));
+      }
+    }
+  }
+
+  result.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  cachedLibraryFiles = result;
+  cachedAt = now;
+  return result;
+}
+
+function getLibraryFileById(id) {
+  const record = scanLibraryFiles().find((item) => item.key === `server-${id}`);
+  if (!record) return null;
+  const targetPath = path.resolve(LIBRARY_ROOT, record.relativePath);
+  const relativePath = path.relative(LIBRARY_ROOT, targetPath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  return { record, targetPath };
+}
+
+function handleServerLibrary(req, res, parsedUrl) {
+  if (!SERVER_MODE) {
+    return sendJson(res, 404, { success: false, message: "Server mode is disabled" });
+  }
+
+  if (parsedUrl.pathname === "/api/server-library/config") {
+    return sendJson(res, 200, {
+      success: true,
+      enabled: true,
+      rootName: path.basename(LIBRARY_ROOT),
+      totalCount: scanLibraryFiles().length,
+    });
+  }
+
+  if (parsedUrl.pathname === "/api/server-library/books") {
+    return sendJson(res, 200, {
+      success: true,
+      books: scanLibraryFiles(),
+    });
+  }
+
+  const match = parsedUrl.pathname.match(/^\/api\/server-library\/book\/([a-f0-9]+)$/);
+  if (!match) {
+    return sendJson(res, 404, { success: false, message: "Not Found" });
+  }
+
+  const libraryFile = getLibraryFileById(match[1]);
+  if (!libraryFile || !fs.existsSync(libraryFile.targetPath)) {
+    return sendText(res, 404, "Book not found");
+  }
+
+  const stat = fs.statSync(libraryFile.targetPath);
+  const extension = path.extname(libraryFile.targetPath).toLowerCase();
+  const contentType = MIME_TYPES[extension] || "application/octet-stream";
+  const filename = path.basename(libraryFile.targetPath);
+  const encodedFilename = encodeURIComponent(filename);
+  const range = req.headers.range;
+
+  if (range) {
+    const parts = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+    if (Number.isNaN(start) || Number.isNaN(end) || start > end) {
+      res.writeHead(416, { "Content-Range": `bytes */${stat.size}` });
+      return res.end();
+    }
+
+    res.writeHead(206, {
+      "Content-Type": contentType,
+      "Content-Length": end - start + 1,
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+      "Content-Disposition": `inline; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
+    });
+    return fs.createReadStream(libraryFile.targetPath, { start, end }).pipe(res);
+  }
+
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Length": stat.size,
+    "Accept-Ranges": "bytes",
+    "Content-Disposition": `inline; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
+  });
+  return fs.createReadStream(libraryFile.targetPath).pipe(res);
+}
+
+function handleStaticFile(req, res, parsedUrl) {
+  if (!SERVER_MODE || !fs.existsSync(BUILD_DIR)) {
+    return sendText(res, 404, "Not Found");
+  }
+
+  let filePath;
+  try {
+    filePath = resolveBuildPath(parsedUrl.pathname);
+  } catch (err) {
+    return sendText(res, 400, err.message);
+  }
+
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    filePath = path.join(BUILD_DIR, "index.html");
+  }
+
+  if (!fs.existsSync(filePath)) {
+    return sendText(res, 404, "Build output not found");
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    "Content-Type": MIME_TYPES[extension] || "application/octet-stream",
+    "Content-Length": stat.size,
+  });
+  return fs.createReadStream(filePath).pipe(res);
+}
+
 function handleUpload(req, res, dirParam) {
   const contentType = req.headers["content-type"];
   if (!contentType || !contentType.includes("multipart/form-data")) {
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    return res.end("Invalid Content-Type. Expected multipart/form-data");
+    return sendText(res, 400, "Invalid Content-Type. Expected multipart/form-data");
   }
 
   const boundaryMatch = contentType.match(/boundary=(.+)$/);
   if (!boundaryMatch) {
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    return res.end("Missing boundary in Content-Type");
+    return sendText(res, 400, "Missing boundary in Content-Type");
   }
 
   const boundary = boundaryMatch[1];
-  let body = [];
-
+  const body = [];
   req.on("data", (chunk) => body.push(chunk));
   req.on("end", () => {
     try {
-      const buffer = Buffer.concat(body);
-      const parts = parseMultipart(buffer, boundary);
-
+      const parts = parseMultipart(Buffer.concat(body), boundary);
       if (!parts.file || !parts.filename) {
-        console.info("Parsed parts:", Object.keys(parts)); // 调试信息
         throw new Error("No valid file uploaded");
       }
 
-      // 安全处理文件名
       const safeFilename = sanitizeFilename(parts.filename);
-
-      // 验证文件名
       if (!safeFilename || safeFilename === "." || safeFilename === "..") {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        return res.end("Invalid filename");
+        return sendText(res, 400, "Invalid filename");
       }
 
-      // 解析并验证目标路径
-      const targetDir = resolveSafePath(dirParam);
-      const filePath = resolveSafePath(dirParam, safeFilename);
-
-      // 确保目标目录存在
+      const targetDir = resolveUploadPath(dirParam);
+      const filePath = resolveUploadPath(dirParam, safeFilename);
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
@@ -246,29 +441,23 @@ function handleUpload(req, res, dirParam) {
       fs.writeFile(filePath, parts.file, (err) => {
         if (err) {
           console.error("File write error:", err);
-          res.writeHead(500, { "Content-Type": "text/plain" });
-          return res.end("Internal Server Error");
+          return sendText(res, 500, "Internal Server Error");
         }
 
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            success: true,
-            filename: safeFilename,
-            directory: dirParam,
-            message: "File uploaded successfully",
-          })
-        );
+        return sendJson(res, 200, {
+          success: true,
+          filename: safeFilename,
+          directory: dirParam,
+          message: "File uploaded successfully",
+        });
       });
     } catch (err) {
       console.error("Upload error:", err);
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      res.end(err.message);
+      return sendText(res, 400, err.message);
     }
   });
 }
 
-// 解析multipart数据 - 改进版本
 function parseMultipart(buffer, boundary) {
   const result = {};
   const boundaryBuffer = Buffer.from(`--${boundary}`);
@@ -279,7 +468,6 @@ function parseMultipart(buffer, boundary) {
 
   while (end !== -1) {
     if (start !== 0) {
-      // 跳过第一个边界前的内容
       parts.push(buffer.slice(start, end));
     }
     start = end + boundaryBuffer.length;
@@ -288,17 +476,12 @@ function parseMultipart(buffer, boundary) {
 
   for (const part of parts) {
     if (part.length === 0) continue;
-
-    // 查找头部结束位置
     const headerEndIndex = part.indexOf("\r\n\r\n");
     if (headerEndIndex === -1) continue;
 
     const headers = part.slice(0, headerEndIndex).toString();
     const content = part.slice(headerEndIndex + 4);
-
-    // 移除结尾的 \r\n
     const actualContent = content.slice(0, content.length - 2);
-
     const nameMatch = headers.match(/name="([^"]+)"/);
     const filenameMatch = headers.match(/filename="([^"]+)"/);
 
@@ -307,9 +490,6 @@ function parseMultipart(buffer, boundary) {
       if (filenameMatch && filenameMatch[1]) {
         result.filename = filenameMatch[1];
         result.file = actualContent;
-        console.info(
-          `Found file: ${result.filename}, size: ${actualContent.length} bytes`
-        ); // 调试信息
       } else {
         result[name] = actualContent.toString();
       }
@@ -318,137 +498,82 @@ function parseMultipart(buffer, boundary) {
 
   return result;
 }
-// 文件下载处理
+
 function handleDownload(req, res, dirParam) {
   try {
     const parsedUrl = url.parse(req.url, true);
     const filename = parsedUrl.query.filename;
+    if (!filename) return sendText(res, 400, "Missing filename parameter");
 
-    if (!filename) {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Missing filename parameter");
-    }
-
-    // 安全处理文件名
     const safeFilename = sanitizeFilename(filename);
-
-    // 验证文件名
     if (!safeFilename || safeFilename === "." || safeFilename === "..") {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Invalid filename");
+      return sendText(res, 400, "Invalid filename");
     }
 
-    // 解析并验证文件路径
-    const filePath = resolveSafePath(dirParam, safeFilename);
-
-    // 检查文件是否存在
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      return res.end("File not found");
-    }
+    const filePath = resolveUploadPath(dirParam, safeFilename);
+    if (!fs.existsSync(filePath)) return sendText(res, 404, "File not found");
 
     const stat = fs.statSync(filePath);
-
-    // 设置下载文件名
     const encodedFilename = encodeURIComponent(safeFilename);
     res.writeHead(200, {
       "Content-Type": "application/octet-stream",
       "Content-Length": stat.size,
       "Content-Disposition": `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
     });
-
     fs.createReadStream(filePath).pipe(res);
   } catch (err) {
     console.error("Download error:", err);
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    res.end(err.message);
+    sendText(res, 400, err.message);
   }
 }
+
 function handleDelete(req, res, dirParam) {
   try {
     const parsedUrl = url.parse(req.url, true);
     const filename = parsedUrl.query.filename;
+    if (!filename) return sendText(res, 400, "Missing filename parameter");
 
-    if (!filename) {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Missing filename parameter");
-    }
-
-    // 安全处理文件名
     const safeFilename = sanitizeFilename(filename);
-
-    // 验证文件名
     if (!safeFilename || safeFilename === "." || safeFilename === "..") {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Invalid filename");
+      return sendText(res, 400, "Invalid filename");
     }
 
-    // 解析并验证文件路径
-    const filePath = resolveSafePath(dirParam, safeFilename);
-
-    // 检查文件是否存在
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      return res.end("File not found");
+    const filePath = resolveUploadPath(dirParam, safeFilename);
+    if (!fs.existsSync(filePath)) return sendText(res, 404, "File not found");
+    if (!fs.statSync(filePath).isFile()) {
+      return sendText(res, 400, "Target is not a file");
     }
 
-    // 检查是否为文件（非目录）
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Target is not a file");
-    }
-
-    // 删除文件
     fs.unlink(filePath, (err) => {
       if (err) {
         console.error("File delete error:", err);
-        res.writeHead(500, { "Content-Type": "text/plain" });
-        return res.end("Internal Server Error");
+        return sendText(res, 500, "Internal Server Error");
       }
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          success: true,
-          filename: safeFilename,
-          directory: dirParam,
-          message: "File deleted successfully",
-        })
-      );
+      return sendJson(res, 200, {
+        success: true,
+        filename: safeFilename,
+        directory: dirParam,
+        message: "File deleted successfully",
+      });
     });
   } catch (err) {
     console.error("Delete error:", err);
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    res.end(err.message);
+    sendText(res, 400, err.message);
   }
 }
 
-// 目录列表处理
 function handleList(req, res, dirParam) {
   try {
-    // 解析并验证目录路径
-    const targetDir = resolveSafePath(dirParam);
-
-    // 检查目录是否存在
-    if (!fs.existsSync(targetDir)) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      return res.end("Directory not found");
+    const targetDir = resolveUploadPath(dirParam);
+    if (!fs.existsSync(targetDir)) return sendText(res, 404, "Directory not found");
+    if (!fs.statSync(targetDir).isDirectory()) {
+      return sendText(res, 400, "Target is not a directory");
     }
 
-    // 检查是否为目录
-    const stat = fs.statSync(targetDir);
-    if (!stat.isDirectory()) {
-      res.writeHead(400, { "Content-Type": "text/plain" });
-      return res.end("Target is not a directory");
-    }
-
-    // 读取目录内容
     fs.readdir(targetDir, { withFileTypes: true }, (err, entries) => {
       if (err) {
         console.error("Directory read error:", err);
-        res.writeHead(500, { "Content-Type": "text/plain" });
-        return res.end("Internal Server Error");
+        return sendText(res, 500, "Internal Server Error");
       }
 
       const fileList = entries.map((entry) => {
@@ -462,34 +587,102 @@ function handleList(req, res, dirParam) {
         };
       });
 
-      // 按类型和名称排序（目录在前，然后按名称排序）
       fileList.sort((a, b) => {
-        if (a.type !== b.type) {
-          return a.type === "directory" ? -1 : 1;
-        }
+        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
 
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          success: true,
-          directory: dirParam,
-          files: fileList,
-          totalCount: fileList.length,
-        })
-      );
+      return sendJson(res, 200, {
+        success: true,
+        directory: dirParam,
+        files: fileList,
+        totalCount: fileList.length,
+      });
     });
   } catch (err) {
     console.error("List error:", err);
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    res.end(err.message);
+    sendText(res, 400, err.message);
   }
 }
 
-// 启动服务器
-server.listen(PORT, () => {
-  console.info(`Secure File Server running at http://localhost:${PORT}`);
-  console.info(`Username: ${VALID_CREDENTIALS.username}`);
-  console.info("Password: [HIDDEN FOR SECURITY]");
+function handleLegacyFileServer(req, res, parsedUrl) {
+  if (!SERVER_ENABLED) return false;
+  if (!["/upload", "/download", "/delete", "/list"].includes(parsedUrl.pathname)) {
+    return false;
+  }
+
+  if (!authenticate(req)) {
+    res.writeHead(401, {
+      "WWW-Authenticate": 'Basic realm="Secure File Server"',
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    res.end("Unauthorized");
+    return true;
+  }
+
+  if (req.method === "POST" && parsedUrl.pathname === "/upload") {
+    handleUpload(req, res, parsedUrl.query.dir || "");
+  } else if (req.method === "GET" && parsedUrl.pathname === "/download") {
+    handleDownload(req, res, parsedUrl.query.dir || "");
+  } else if (req.method === "DELETE" && parsedUrl.pathname === "/delete") {
+    handleDelete(req, res, parsedUrl.query.dir || "");
+  } else if (req.method === "GET" && parsedUrl.pathname === "/list") {
+    handleList(req, res, parsedUrl.query.dir || "");
+  } else {
+    sendText(res, 405, "Method Not Allowed");
+  }
+  return true;
+}
+
+const server = http.createServer((req, res) => {
+  const origin = req.headers.origin;
+  const serverOrigin = getServerOrigin(req);
+  const isCrossOrigin = !!origin && origin !== serverOrigin;
+  const corsAllowed = applyCorsHeaders(req, res);
+
+  if (req.method === "OPTIONS") {
+    if (isCrossOrigin && !corsAllowed) {
+      return sendText(res, 403, "Origin not allowed");
+    }
+    res.writeHead(204);
+    return res.end();
+  }
+
+  if (isCrossOrigin && !corsAllowed) {
+    return sendText(res, 403, "Origin not allowed");
+  }
+
+  const parsedUrl = url.parse(req.url, true);
+  if (REQUIRE_AUTH && !authenticate(req)) {
+    res.writeHead(401, {
+      "WWW-Authenticate": 'Basic realm="Koodo Reader Server"',
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    return res.end("Unauthorized");
+  }
+
+  if (parsedUrl.pathname.startsWith("/api/server-library/")) {
+    return handleServerLibrary(req, res, parsedUrl);
+  }
+
+  if (handleLegacyFileServer(req, res, parsedUrl)) {
+    return;
+  }
+
+  return handleStaticFile(req, res, parsedUrl);
+});
+
+server.listen(PORT, HOST, () => {
+  console.info(`Koodo Reader server running at http://${HOST}:${PORT}`);
+  if (SERVER_MODE) {
+    console.info(`Serving web build from: ${BUILD_DIR}`);
+    console.info(`Serving library from: ${LIBRARY_ROOT}`);
+    console.info(`Found ${scanLibraryFiles().length} supported books`);
+  }
+  if (SERVER_ENABLED) {
+    console.info(`Legacy file API enabled. Upload directory: ${UPLOAD_DIR}`);
+  }
+  if (REQUIRE_AUTH) {
+    console.info(`Basic auth enabled. Username: ${VALID_CREDENTIALS.username}`);
+  }
 });
