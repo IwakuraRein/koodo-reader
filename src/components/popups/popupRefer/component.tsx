@@ -6,6 +6,8 @@ import { openExternalUrl } from "../../../utils/common";
 import Parser from "html-react-parser";
 import { ConfigService } from "../../../assets/lib/kookit-extra-browser.min";
 
+const EPUB_TYPE_NS = "http://www.idpf.org/2007/ops";
+
 class PopupRefer extends React.Component<PopupReferProps, PopupReferStates> {
   highlighter: any;
   timer!: NodeJS.Timeout;
@@ -46,13 +48,39 @@ class PopupRefer extends React.Component<PopupReferProps, PopupReferStates> {
     }
     this.handleLinkJump(event);
   };
-  handleShowMenu = async (node, rect) => {
+  getClosestNoterefAnchor = (target: any): HTMLAnchorElement | null => {
+    let node = target;
+    while (node && node.tagName !== "BODY") {
+      if (node.tagName === "A") {
+        const epubType =
+          node.getAttribute("epub:type") ||
+          node.getAttributeNS?.(EPUB_TYPE_NS, "type") ||
+          "";
+        const role = node.getAttribute("role") || "";
+        if (
+          epubType.split(/\s+/).includes("noteref") ||
+          role === "doc-noteref"
+        ) {
+          return node as HTMLAnchorElement;
+        }
+      }
+      node = node.parentElement;
+    }
+    return null;
+  };
+  getNodeByHash = (doc: Document, href: string): Element | null => {
+    const id = href.split("#").reverse()[0];
+    if (!id) return null;
+    return doc.getElementById(id) || doc.body.querySelector("#" + CSS.escape(id));
+  };
+  handleShowMenu = async (node, rect, href = "") => {
     let result = await this.props.rendition.getFootnoteContent(node);
     if (!result.handled) return;
     this.setState(
       {
         rect: rect,
         footnote: result.content,
+        href,
         isOpenMenu: true,
       },
       () => {
@@ -62,7 +90,20 @@ class PopupRefer extends React.Component<PopupReferProps, PopupReferStates> {
   };
   handleLinkJump = async (event: any): Promise<boolean> => {
     let href = this.props.rendition.getTargetHref(event);
-    let result = await this.props.rendition.handleLinkJump(href, event);
+    const noterefAnchor = this.getClosestNoterefAnchor(event.target);
+    const noterefNode =
+      noterefAnchor && href
+        ? this.getNodeByHash(noterefAnchor.ownerDocument, href)
+        : null;
+    let result = noterefNode
+      ? {
+          handled: true,
+          isShowMenu: true,
+          isJump: false,
+          href,
+          node: noterefNode,
+        }
+      : await this.props.rendition.handleLinkJump(href, event);
     if (!result.handled) {
       return false;
     }
@@ -86,7 +127,7 @@ class PopupRefer extends React.Component<PopupReferProps, PopupReferStates> {
     if (result.isShowMenu) {
       let targetElement = event.target;
       let rect = targetElement.getBoundingClientRect();
-      await this.handleShowMenu(result.node, rect);
+      await this.handleShowMenu(result.node, rect, result.href || "");
       return true;
     }
     return true;
