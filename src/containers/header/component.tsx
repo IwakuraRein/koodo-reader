@@ -613,13 +613,13 @@ class Header extends React.Component<HeaderProps, HeaderState> {
         )}
         <div
           className="header-search-container"
-          style={this.props.isCollapsed ? { width: "369px" } : {}}
+          style={this.props.isCollapsed ? { width: "220px" } : {}}
         >
           <SearchBox />
         </div>
         <div
           className="setting-icon-parrent"
-          style={this.props.isCollapsed ? { marginLeft: "430px" } : {}}
+          style={this.props.isCollapsed ? { marginLeft: "280px" } : {}}
         >
           <div
             className="setting-icon-container"
@@ -777,20 +777,6 @@ class Header extends React.Component<HeaderProps, HeaderState> {
               }}
             >
               <Trans>Renew Pro</Trans>
-            </span>
-          </div>
-        ) : null}
-        {KookitConfig.CloudMode !== "production" ? (
-          <div className="header-report-container" style={{ right: "300px" }}>
-            <span
-              style={{
-                color: "red",
-                opacity: 1,
-                fontWeight: "bold",
-              }}
-            >
-              <Trans>TEST</Trans>
-              <span> </span>
             </span>
           </div>
         ) : null}
