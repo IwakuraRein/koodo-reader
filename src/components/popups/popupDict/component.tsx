@@ -32,8 +32,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
       word: "",
       prototype: "",
       dictService: ConfigService.getReaderConfig("dictService"),
-      dictTarget: ConfigService.getReaderConfig("dictTarget") || "",
-      dictSource: ConfigService.getReaderConfig("dictSource") || "",
+      dictTarget: this.getDictionaryTargetLang(),
+      dictSource: this.getDictionarySourceLang(),
       isAddNew: false,
       isShowUrl: false,
       aiAnswer: "",
@@ -61,6 +61,25 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
       this.setState({ aiAnswer: this.aiTextAccumulator });
     }
   }
+
+  private getDictionaryTargetLang() {
+    const lang = ConfigService.getReaderConfig("lang");
+    return (
+      ConfigService.getReaderConfig("dictTarget") ||
+      ConfigService.getReaderConfig("transTarget") ||
+      (lang && lang.startsWith("zh") ? "chs" : "eng")
+    );
+  }
+
+  private getDictionarySourceLang() {
+    const lang = ConfigService.getReaderConfig("lang");
+    return (
+      ConfigService.getReaderConfig("dictSource") ||
+      ConfigService.getReaderConfig("transSource") ||
+      (lang && lang.startsWith("zh") ? "chs" : "eng")
+    );
+  }
+
   componentDidMount() {
     this.handleLookUp();
   }
@@ -116,12 +135,17 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         let targetLang =
           this.state.dictTarget ||
           ConfigService.getReaderConfig("dictTarget") ||
+          ConfigService.getReaderConfig("transTarget") ||
           KookitConfig.ConvertLangMap[
-            ConfigService.getReaderConfig("lang") || "zhCN"
+          ConfigService.getReaderConfig("lang") || "zhCN"
           ];
         let systemPrompt =
           ConfigService.getReaderConfig("aiDictPrompt") ||
           KookitConfig.DefaultPrompts.aiDict;
+        systemPrompt = systemPrompt.replace(
+          "{from}",
+          this.getDictionarySourceLang()
+        );
         systemPrompt = systemPrompt.replace("{word}", text);
         systemPrompt = systemPrompt.replace("{to}", targetLang);
         let config: any = plugin.config || {};
@@ -165,7 +189,7 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         dictText = await window.getDictText(
           text,
           "auto",
-          this.state.dictTarget || "en",
+          this.state.dictTarget || this.getDictionaryTargetLang(),
           axios,
           this.props.t,
           plugin.config
@@ -180,7 +204,7 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         });
         dictText = await getDictText(
           text,
-          ConfigService.getReaderConfig("dictTarget") || "auto",
+          this.getDictionaryTargetLang(),
           ConfigService.getReaderConfig("lang") &&
             ConfigService.getReaderConfig("lang").startsWith("zh")
             ? "chs"
@@ -224,8 +248,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
     } catch (error) {
       toast.error(
         this.props.t("Error happened") +
-          ": " +
-          (error instanceof Error ? error.message : String(error))
+        ": " +
+        (error instanceof Error ? error.message : String(error))
       );
       console.error(error);
       this.setState({
@@ -273,15 +297,7 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
       },
       () => {
         ConfigService.setReaderConfig("dictService", dictService);
-        this.setState(
-          {
-            dictTarget: "en",
-          },
-          () => {
-            ConfigService.setReaderConfig("dictTarget", "en");
-            this.handleLookUp();
-          }
-        );
+        this.handleLookUp();
       }
     );
   };
@@ -344,7 +360,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
                 this.setState(
                   {
-                    dictTarget: event.target.value || "en",
+                    dictTarget:
+                      event.target.value || this.getDictionaryTargetLang(),
                   },
                   () => {
                     ConfigService.setReaderConfig(
@@ -419,7 +436,7 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
                   this.state.dictText + "<address></address>"
                 ) || " ",
                 {
-                  replace: (_domNode) => {},
+                  replace: (_domNode) => { },
                 }
               )}
               {(this.state.isAiWaiting || this.state.aiAnswer) && (
@@ -438,10 +455,10 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
                       {Parser(
                         DOMPurify.sanitize(
                           (marked.parse(this.state.aiAnswer) as string) +
-                            "<address></address>"
+                          "<address></address>"
                         ) || " ",
                         {
-                          replace: (_domNode) => {},
+                          replace: (_domNode) => { },
                         }
                       )}
                     </div>
