@@ -59,6 +59,34 @@
   bottom: 8px;
   right: 20px;
 }
+.popup-dict-selector-container {
+  position: absolute;
+  top: 30px;
+  right: 25px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 50px);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.popup-dict-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.popup-dict-control-label {
+  color: #2084e8;
+  font-size: 13px;
+  line-height: 30px;
+}
+.popup-dict-service-selector {
+  width: 120px;
+}
+.popup-dict-lang-selector {
+  width: 100px;
+}
 .dict-service-container {
   position: absolute;
   /* width: calc(100% - 32px); */
@@ -66,7 +94,6 @@
   right: 25px;
 }
 .dict-service-selector {
-  width: 100px;
   height: 30px;
   opacity: 1;
   font-size: 15px;

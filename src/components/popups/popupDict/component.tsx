@@ -27,13 +27,14 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
 
   constructor(props: PopupDictProps) {
     super(props);
+    const dictService = ConfigService.getReaderConfig("dictService");
     this.state = {
       dictText: this.props.t("Please wait"),
       word: "",
       prototype: "",
-      dictService: ConfigService.getReaderConfig("dictService"),
-      dictTarget: this.getDictionaryTargetLang(),
-      dictSource: this.getDictionarySourceLang(),
+      dictService: dictService,
+      dictTarget: this.getDictionaryTargetLang(dictService),
+      dictSource: this.getDictionarySourceLang(dictService),
       isAddNew: false,
       isShowUrl: false,
       aiAnswer: "",
@@ -62,21 +63,74 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
     }
   }
 
-  private getDictionaryTargetLang() {
-    const lang = ConfigService.getReaderConfig("lang");
+  private getDictionaryLangCode(lang: string, langList: any[]) {
+    if (!lang) return "";
+    if (langList.some((item) => item.code === lang)) {
+      return lang;
+    }
     return (
-      ConfigService.getReaderConfig("dictTarget") ||
-      ConfigService.getReaderConfig("transTarget") ||
+      langList.find(
+        (item) => item.lang === lang || item.nativeLang === lang
+      )?.code || ""
+    );
+  }
+
+  private getDictionaryTargetLang(dictService?: string) {
+    const lang = ConfigService.getReaderConfig("lang");
+    const langList = this.getDictionaryLangList(dictService);
+    return (
+      this.getDictionaryLangCode(
+        ConfigService.getReaderConfig("dictTarget"),
+        langList
+      ) ||
+      this.getDictionaryLangCode(
+        ConfigService.getReaderConfig("transTarget"),
+        langList
+      ) ||
       (lang && lang.startsWith("zh") ? "chs" : "eng")
     );
   }
 
-  private getDictionarySourceLang() {
-    const lang = ConfigService.getReaderConfig("lang");
+  private getDictionaryPlugin(dictService?: string) {
+    const targetService =
+      dictService ||
+      this.state?.dictService ||
+      ConfigService.getReaderConfig("dictService");
+    return this.props.plugins.find((item) => item.key === targetService);
+  }
+
+  private getDictionaryLangList(dictService?: string) {
+    const plugin = this.getDictionaryPlugin(dictService);
+    const langList = Array.isArray(plugin?.langList)
+      ? ([...(plugin?.langList as any[])] as any[])
+      : [];
+    if (
+      plugin?.autoValue &&
+      !langList.some((item) => item.code === plugin.autoValue)
+    ) {
+      langList.unshift({
+        lang: "Automatic",
+        code: plugin.autoValue,
+        nativeLang: "Automatic",
+      });
+    }
+    return langList;
+  }
+
+  private getDictionarySourceLang(dictService?: string) {
+    const plugin = this.getDictionaryPlugin(dictService);
+    const langList = this.getDictionaryLangList(dictService);
     return (
-      ConfigService.getReaderConfig("dictSource") ||
-      ConfigService.getReaderConfig("transSource") ||
-      (lang && lang.startsWith("zh") ? "chs" : "eng")
+      this.getDictionaryLangCode(
+        ConfigService.getReaderConfig("dictSource"),
+        langList
+      ) ||
+      this.getDictionaryLangCode(
+        ConfigService.getReaderConfig("transSource"),
+        langList
+      ) ||
+      plugin?.autoValue ||
+      "auto"
     );
   }
 
@@ -100,6 +154,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
       if (pluginList.length > 0) {
         this.setState({
           dictService: pluginList[0].key,
+          dictTarget: this.getDictionaryTargetLang(pluginList[0].key),
+          dictSource: this.getDictionarySourceLang(pluginList[0].key),
         });
         ConfigService.setReaderConfig("dictService", pluginList[0].key);
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -126,26 +182,22 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
     let dictText = "";
     let isFullAnalysis = true;
     try {
+      const sourceLang =
+        this.state.dictSource ||
+        this.getDictionarySourceLang(this.state.dictService);
+      const targetLang =
+        this.state.dictTarget ||
+        this.getDictionaryTargetLang(this.state.dictService);
       if (this.state.dictService === "custom-ai-dict-plugin") {
         this.setState({ isAddNew: false });
         let plugin = this.props.plugins.find(
           (item) => item.key === "custom-ai-dict-plugin"
         );
         if (!plugin) return;
-        let targetLang =
-          this.state.dictTarget ||
-          ConfigService.getReaderConfig("dictTarget") ||
-          ConfigService.getReaderConfig("transTarget") ||
-          KookitConfig.ConvertLangMap[
-          ConfigService.getReaderConfig("lang") || "zhCN"
-          ];
         let systemPrompt =
           ConfigService.getReaderConfig("aiDictPrompt") ||
           KookitConfig.DefaultPrompts.aiDict;
-        systemPrompt = systemPrompt.replace(
-          "{from}",
-          this.getDictionarySourceLang()
-        );
+        systemPrompt = systemPrompt.replace("{from}", sourceLang);
         systemPrompt = systemPrompt.replace("{word}", text);
         systemPrompt = systemPrompt.replace("{to}", targetLang);
         let config: any = plugin.config || {};
@@ -188,8 +240,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         eval(dictFunc);
         dictText = await window.getDictText(
           text,
-          "auto",
-          this.state.dictTarget || this.getDictionaryTargetLang(),
+          sourceLang,
+          targetLang,
           axios,
           this.props.t,
           plugin.config
@@ -204,11 +256,8 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         });
         dictText = await getDictText(
           text,
-          this.getDictionaryTargetLang(),
-          ConfigService.getReaderConfig("lang") &&
-            ConfigService.getReaderConfig("lang").startsWith("zh")
-            ? "chs"
-            : "eng"
+          sourceLang,
+          targetLang
         );
         if (dictText) {
           isFullAnalysis = false;
@@ -243,7 +292,12 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
         ConfigService.getReaderConfig("isDisableAI") !== "yes" &&
         this.state.dictService === "official-ai-dict-plugin"
       ) {
-        this.handleDictionaryStream(text, isFullAnalysis);
+        this.handleDictionaryStream(
+          text,
+          isFullAnalysis,
+          sourceLang,
+          targetLang
+        );
       }
     } catch (error) {
       toast.error(
@@ -257,15 +311,20 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
       });
     }
   };
-  handleDictionaryStream = async (text: string, isFullAnalysis: boolean) => {
+  handleDictionaryStream = async (
+    text: string,
+    isFullAnalysis: boolean,
+    sourceLang: string,
+    targetLang: string
+  ) => {
     try {
       this.aiTextAccumulator = "";
       this.setState({ aiAnswer: "", isAiWaiting: true });
       this.startUpdateInterval();
       let res = await getDictionaryStream(
         text,
-        "auto",
-        navigator.language,
+        sourceLang,
+        targetLang,
         this.props.originalSentence,
         isFullAnalysis,
         (result) => {
@@ -290,9 +349,13 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
     }
   };
   handleChangeDictService = (dictService: string) => {
+    const dictSource = this.getDictionarySourceLang(dictService);
+    const dictTarget = this.getDictionaryTargetLang(dictService);
     this.setState(
       {
         dictService: dictService,
+        dictTarget: dictTarget,
+        dictSource: dictSource,
         isAddNew: false,
       },
       () => {
@@ -304,83 +367,81 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
 
   render() {
     const renderDictBox = () => {
+      const dictLangList = this.getDictionaryLangList();
       return (
         <div className="dict-container">
-          <div className="dict-service-container">
-            <select
-              className="dict-service-selector"
-              style={{ margin: 0 }}
-              value={this.state.dictService}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                if (event.target.value === "add-new") {
-                  this.props.handleOpenMenu(false);
-                  this.props.handleMenuMode("");
-                  this.props.handleSetting(true);
-                  this.props.handleSettingMode("plugins");
-                  return;
-                }
-                this.handleChangeDictService(event.target.value);
-              }}
-            >
-              <option
-                value={""}
-                key={"select"}
-                className="add-dialog-shelf-list-option"
-              >
-                {this.props.t("Please select")}
-              </option>
-              {this.props.plugins
-                .filter((item) => item.type === "dictionary")
-                .map((item) => {
-                  return (
-                    <option
-                      value={item.key}
-                      key={item.key}
-                      className="add-dialog-shelf-list-option"
-                    >
-                      {this.props.t(item.displayName)}
-                    </option>
-                  );
-                })}
-              <option
-                value={"add-new"}
-                key={"add-new"}
-                className="add-dialog-shelf-list-option"
-              >
-                {this.props.t("Add new plugin")}
-              </option>
-            </select>
-          </div>
-
-          <div className="dict-service-container" style={{ right: 150 }}>
-            <select
-              className="dict-service-selector"
-              style={{ margin: 0 }}
-              value={this.state.dictTarget}
-              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                this.setState(
-                  {
-                    dictTarget:
-                      event.target.value || this.getDictionaryTargetLang(),
-                  },
-                  () => {
-                    ConfigService.setReaderConfig(
-                      "dictTarget",
-                      event.target.value
-                    );
-                    this.handleLookUp();
+          <div className="popup-dict-selector-container">
+            <div className="popup-dict-control">
+              <select
+                className="dict-service-selector popup-dict-service-selector"
+                style={{ margin: 0 }}
+                value={this.state.dictService}
+                onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                  if (event.target.value === "add-new") {
+                    this.props.handleOpenMenu(false);
+                    this.props.handleMenuMode("");
+                    this.props.handleSetting(true);
+                    this.props.handleSettingMode("plugins");
+                    return;
                   }
-                );
-              }}
-            >
-              {this.props.plugins.find(
-                (item) => item.key === this.state.dictService
-              )?.langList &&
-                (
-                  this.props.plugins.find(
-                    (item) => item.key === this.state.dictService
-                  )?.langList as any[]
-                ).map((item) => {
+                  this.handleChangeDictService(event.target.value);
+                }}
+              >
+                <option
+                  value={""}
+                  key={"select"}
+                  className="add-dialog-shelf-list-option"
+                >
+                  {this.props.t("Please select")}
+                </option>
+                {this.props.plugins
+                  .filter((item) => item.type === "dictionary")
+                  .map((item) => {
+                    return (
+                      <option
+                        value={item.key}
+                        key={item.key}
+                        className="add-dialog-shelf-list-option"
+                      >
+                        {this.props.t(item.displayName)}
+                      </option>
+                    );
+                  })}
+                <option
+                  value={"add-new"}
+                  key={"add-new"}
+                  className="add-dialog-shelf-list-option"
+                >
+                  {this.props.t("Add new plugin")}
+                </option>
+              </select>
+            </div>
+            <div className="popup-dict-control">
+              <span className="popup-dict-control-label">
+                <Trans>Source</Trans>
+              </span>
+              <select
+                className="dict-service-selector popup-dict-lang-selector"
+                style={{ margin: 0 }}
+                value={this.state.dictSource}
+                onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                  this.setState(
+                    {
+                      dictSource:
+                        event.target.value ||
+                        this.getDictionarySourceLang(this.state.dictService),
+                    },
+                    () => {
+                      ConfigService.setReaderConfig(
+                        "dictSource",
+                        event.target.value
+                      );
+                      this.handleLookUp();
+                    }
+                  );
+                }}
+              >
+                {dictLangList.map((item) => {
                   return (
                     <option
                       value={item.code}
@@ -391,7 +452,45 @@ class PopupDict extends React.Component<PopupDictProps, PopupDictState> {
                     </option>
                   );
                 })}
-            </select>
+              </select>
+            </div>
+            <div className="popup-dict-control">
+              <span className="popup-dict-control-label">
+                <Trans>Target</Trans>
+              </span>
+              <select
+                className="dict-service-selector popup-dict-lang-selector"
+                style={{ margin: 0 }}
+                value={this.state.dictTarget}
+                onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                  this.setState(
+                    {
+                      dictTarget:
+                        event.target.value || this.getDictionaryTargetLang(),
+                    },
+                    () => {
+                      ConfigService.setReaderConfig(
+                        "dictTarget",
+                        event.target.value
+                      );
+                      this.handleLookUp();
+                    }
+                  );
+                }}
+              >
+                {dictLangList.map((item) => {
+                  return (
+                    <option
+                      value={item.code}
+                      key={item.code}
+                      className="add-dialog-shelf-list-option"
+                    >
+                      {this.props.t(item["nativeLang"])}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
           </div>
           <div className="dict-word">
             {ConfigService.getReaderConfig("isLemmatizeWord") === "yes"

@@ -709,6 +709,7 @@
   "What's new": "新增功能",
   "What's been fixed": "问题修复",
   "Target": "目标语言",
+  "Source": "源语言",
   "Select all": "全选",
   "Execute successful": "执行成功",
   "Restoring from a snapshot will overwrite your current data. Are you sure you want to continue?": "从快照恢复将覆盖您当前的数据，是否继续？",
